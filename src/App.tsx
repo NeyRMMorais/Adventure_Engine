@@ -1,11 +1,15 @@
-import { useState } from "react";
-import { Compass, Sparkles, BookOpen, AlertTriangle } from "lucide-react";
+import { useEffect, useState } from "react";
+import { Compass, AlertTriangle, LogOut } from "lucide-react";
 import { AdventureConfig, AdventureScene, GameState } from "./types";
+import { LoginPanel } from "./components/LoginPanel";
 import { SetupPanel } from "./components/SetupPanel";
 import { GameScreen } from "./components/GameScreen";
 import { SidebarTracker } from "./components/SidebarTracker";
 
 export default function App() {
+  const [authStatus, setAuthStatus] = useState<"checking" | "authenticated" | "anonymous">("checking");
+  const [isAuthLoading, setIsAuthLoading] = useState(false);
+  const [authError, setAuthError] = useState<string | null>(null);
   const [config, setConfig] = useState<AdventureConfig | null>(null);
   const [scenes, setScenes] = useState<AdventureScene[]>([]);
   const [gameState, setGameState] = useState<GameState>({
@@ -18,6 +22,50 @@ export default function App() {
   const [isLoadingNext, setIsLoadingNext] = useState(false);
   const [errorString, setErrorString] = useState<string | null>(null);
 
+  useEffect(() => {
+    const checkAuth = async () => {
+      try {
+        const response = await fetch("/api/auth/status");
+        const data = await response.json();
+        setAuthStatus(data.authenticated ? "authenticated" : "anonymous");
+      } catch {
+        setAuthStatus("anonymous");
+      }
+    };
+
+    checkAuth();
+  }, []);
+
+  const handleLogin = async (pin: string) => {
+    setIsAuthLoading(true);
+    setAuthError(null);
+
+    try {
+      const response = await fetch("/api/auth/login", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ pin })
+      });
+
+      if (!response.ok) {
+        throw new Error(response.status === 429 ? "Too many attempts. Please wait and try again." : "Invalid PIN.");
+      }
+
+      setAuthStatus("authenticated");
+      setAuthError(null);
+    } catch (err: any) {
+      setAuthError(err.message || "Unable to unlock the engine.");
+    } finally {
+      setIsAuthLoading(false);
+    }
+  };
+
+  const handleLogout = async () => {
+    await fetch("/api/auth/logout", { method: "POST" });
+    handleRestart();
+    setAuthStatus("anonymous");
+  };
+
   // Core triggers: Initialize new adventure session
   const handleStartAdventure = async (setupConfig: AdventureConfig) => {
     setIsLoading(true);
@@ -29,6 +77,11 @@ export default function App() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ config: setupConfig })
       });
+
+      if (response.status === 401) {
+        setAuthStatus("anonymous");
+        throw new Error("Session expired. Enter the PIN again.");
+      }
 
       if (!response.ok) {
         throw new Error(`Outpost is offline. Server error code: ${response.status}`);
@@ -86,6 +139,11 @@ export default function App() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload)
       });
+
+      if (response.status === 401) {
+        setAuthStatus("anonymous");
+        throw new Error("Session expired. Enter the PIN again.");
+      }
 
       if (!response.ok) {
         throw new Error(`The weave of destiny failed. Status ${response.status}`);
@@ -148,6 +206,19 @@ export default function App() {
 
   const activeScene = scenes[scenes.length - 1];
 
+  if (authStatus === "checking") {
+    return (
+      <div className="min-h-screen bg-immersive-bg text-slate-100 flex items-center justify-center font-sans">
+        <div className="flex flex-col items-center justify-center py-24 text-slate-400 gap-4">
+          <div className="w-10 h-10 border-4 border-white/5 border-t-immersive-accent rounded-full animate-spin" />
+          <span className="font-mono text-[10px] tracking-widest uppercase text-immersive-accent font-extrabold animate-pulse">
+            Checking secure gate...
+          </span>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="min-h-screen bg-immersive-bg text-slate-100 flex flex-col font-sans transition-all selection:bg-immersive-accent selection:text-immersive-bg">
       {/* Top Banner Navigation */}
@@ -169,15 +240,25 @@ export default function App() {
           </div>
 
           <div className="flex items-center gap-2">
-            <div className="w-2 h-2 rounded-full bg-immersive-accent animate-pulse" />
-            <span className="text-[10px] font-mono tracking-wider text-slate-400 uppercase font-bold">
-              Gemini Core Synchronized
-            </span>
+            {authStatus === "authenticated" && (
+              <button
+                type="button"
+                onClick={handleLogout}
+                className="text-[10px] font-mono tracking-wider text-slate-400 hover:text-rose-300 uppercase font-bold flex items-center gap-1.5 transition-colors"
+              >
+                <LogOut className="w-3 h-3" />
+                Lock
+              </button>
+            )}
           </div>
         </div>
       </nav>
 
       <main className="flex-1 max-w-7xl w-full mx-auto p-4 sm:p-6 lg:p-8 flex flex-col justify-center">
+        {authStatus === "anonymous" ? (
+          <LoginPanel onLogin={handleLogin} isLoading={isAuthLoading} error={authError} />
+        ) : (
+          <>
         {/* Error notification banner if any API failed */}
         {errorString && (
           <div className="bg-rose-950/20 border border-rose-500/30 text-rose-300 px-5 py-4 rounded-2xl mb-6 text-xs flex items-start gap-3 shadow-lg">
@@ -220,6 +301,8 @@ export default function App() {
             <div className="w-10 h-10 border-4 border-white/5 border-t-immersive-accent rounded-full animate-spin" />
             <span className="font-mono text-[10px] tracking-widest uppercase text-immersive-accent font-extrabold animate-pulse">Unpacking narrative portals...</span>
           </div>
+        )}
+          </>
         )}
       </main>
 
