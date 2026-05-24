@@ -1,0 +1,6 @@
+{
+  "name": "Adventure Engine",
+  "description": "An infinite choose-your-own-adventure game creator with AI-generated worlds, consistent digital sketches, and inventory & quest tracking.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
