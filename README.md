@@ -74,6 +74,14 @@ npm start
 | `APP_PIN` | Yes | PIN used to unlock the app UI and protected APIs. |
 | `AUTH_SECRET` | Yes | Secret used to sign the HttpOnly auth cookie. Use a long random value in production. |
 | `APP_URL` | No | Hosted app URL. AI Studio may provide this automatically. |
+| `DAILY_STORY_LIMIT` | No | Maximum paid story generation requests per day. Use `0` to disable. |
+| `DAILY_IMAGE_LIMIT` | No | Maximum paid image generation requests per day. Use `0` to disable. |
+| `SESSION_STORY_LIMIT` | No | Maximum paid story generation requests per login session. Use `0` to disable. |
+| `SESSION_IMAGE_LIMIT` | No | Maximum paid image generation requests per login session. Use `0` to disable. |
+| `DAILY_ESTIMATED_USD_LIMIT` | No | Optional daily estimated spend ceiling. Use `0` to disable. |
+| `COST_TEXT_INPUT_USD_PER_1M_TOKENS` | No | Optional input-token price for estimated cost logs. |
+| `COST_TEXT_OUTPUT_USD_PER_1M_TOKENS` | No | Optional output-token price for estimated cost logs. |
+| `COST_IMAGE_USD_PER_GENERATED_IMAGE` | No | Optional generated-image price for estimated cost logs. |
 
 ## Security Notes
 
@@ -83,6 +91,21 @@ npm start
 - Server-side request validation bounds user-controlled config, state, history, inventory, and image prompts.
 - Basic rate limits protect login, adventure, and image routes.
 - Security headers are set by the Express server.
+
+## Usage And Cost Controls
+
+Adventure Engine includes app-level controls to reduce the chance of unexpected Gemini usage:
+
+- Daily story generation limit.
+- Daily image generation limit.
+- Per-session story generation limit.
+- Per-session image generation limit.
+- Optional daily estimated USD ceiling when unit prices are configured.
+- Protected usage endpoint at `/api/admin/usage` after PIN login.
+
+Story requests return `429` when a story limit is reached. Image requests degrade to SVG fallback when an image limit is reached, avoiding an additional paid image call.
+
+The server logs one structured `usage` event for each paid Gemini call. Logs include the model, request type, status, token counts when available, generated image count, estimated cost when prices are configured, latency, and an anonymized session key.
 
 ## Deployment
 

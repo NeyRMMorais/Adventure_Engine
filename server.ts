@@ -14,6 +14,8 @@ const PORT = 3000;
 const IS_PRODUCTION = process.env.NODE_ENV === "production";
 const AUTH_COOKIE_NAME = "adventure_engine_auth";
 const AUTH_MAX_AGE_MS = 1000 * 60 * 60 * 24 * 7;
+const STORY_MODEL = "gemini-3.5-flash";
+const IMAGE_MODEL = "gemini-2.5-flash-image";
 
 app.set("trust proxy", 1);
 
@@ -48,7 +50,31 @@ type RateLimitBucket = {
   count: number;
 };
 
+type UsageKind = "story" | "image";
+
+type UsageSession = {
+  date: string;
+  storyRequests: number;
+  imageRequests: number;
+  estimatedCostUsd: number;
+};
+
+type DailyUsage = UsageSession & {
+  storySuccesses: number;
+  storyFailures: number;
+  storyBlocked: number;
+  imageSuccesses: number;
+  imageFallbacks: number;
+  imageFailures: number;
+  imageBlocked: number;
+  inputTokens: number;
+  outputTokens: number;
+};
+
 const rateLimitBuckets = new Map<string, RateLimitBucket>();
+const usageSessions = new Map<string, UsageSession>();
+
+let dailyUsage: DailyUsage = createDailyUsage(getUsageDateKey());
 
 function getClientIp(req: express.Request) {
   return req.ip || req.socket.remoteAddress || "unknown";
@@ -72,6 +98,63 @@ function rateLimit(name: string, maxRequests: number, windowMs: number): express
     }
 
     next();
+  };
+}
+
+function getUsageDateKey(date = new Date()) {
+  return date.toISOString().slice(0, 10);
+}
+
+function createDailyUsage(date: string): DailyUsage {
+  return {
+    date,
+    storyRequests: 0,
+    imageRequests: 0,
+    estimatedCostUsd: 0,
+    storySuccesses: 0,
+    storyFailures: 0,
+    storyBlocked: 0,
+    imageSuccesses: 0,
+    imageFallbacks: 0,
+    imageFailures: 0,
+    imageBlocked: 0,
+    inputTokens: 0,
+    outputTokens: 0,
+  };
+}
+
+function resetUsageIfNeeded() {
+  const today = getUsageDateKey();
+  if (dailyUsage.date !== today) {
+    dailyUsage = createDailyUsage(today);
+    usageSessions.clear();
+  }
+}
+
+function getPositiveIntEnv(name: string, fallback: number) {
+  const raw = process.env[name];
+  if (!raw) return fallback;
+  const value = Number.parseInt(raw, 10);
+  return Number.isFinite(value) && value >= 0 ? value : fallback;
+}
+
+function getNonNegativeNumberEnv(name: string, fallback: number) {
+  const raw = process.env[name];
+  if (!raw) return fallback;
+  const value = Number.parseFloat(raw);
+  return Number.isFinite(value) && value >= 0 ? value : fallback;
+}
+
+function getUsageConfig() {
+  return {
+    dailyStoryLimit: getPositiveIntEnv("DAILY_STORY_LIMIT", 100),
+    dailyImageLimit: getPositiveIntEnv("DAILY_IMAGE_LIMIT", 30),
+    sessionStoryLimit: getPositiveIntEnv("SESSION_STORY_LIMIT", 20),
+    sessionImageLimit: getPositiveIntEnv("SESSION_IMAGE_LIMIT", 10),
+    dailyEstimatedUsdLimit: getNonNegativeNumberEnv("DAILY_ESTIMATED_USD_LIMIT", 0),
+    textInputUsdPer1MTokens: getNonNegativeNumberEnv("COST_TEXT_INPUT_USD_PER_1M_TOKENS", 0),
+    textOutputUsdPer1MTokens: getNonNegativeNumberEnv("COST_TEXT_OUTPUT_USD_PER_1M_TOKENS", 0),
+    imageUsdPerGeneratedImage: getNonNegativeNumberEnv("COST_IMAGE_USD_PER_GENERATED_IMAGE", 0),
   };
 }
 
@@ -136,6 +219,34 @@ function getSessionToken(req: express.Request) {
   return parseCookies(req.headers.cookie)[AUTH_COOKIE_NAME];
 }
 
+function getUsageSessionKey(req: express.Request) {
+  const token = getSessionToken(req);
+  if (token) {
+    return crypto.createHash("sha256").update(token).digest("hex").slice(0, 16);
+  }
+
+  return crypto.createHash("sha256").update(getClientIp(req)).digest("hex").slice(0, 16);
+}
+
+function getUsageSession(req: express.Request) {
+  resetUsageIfNeeded();
+  const key = getUsageSessionKey(req);
+  const existing = usageSessions.get(key);
+
+  if (existing && existing.date === dailyUsage.date) {
+    return existing;
+  }
+
+  const session: UsageSession = {
+    date: dailyUsage.date,
+    storyRequests: 0,
+    imageRequests: 0,
+    estimatedCostUsd: 0,
+  };
+  usageSessions.set(key, session);
+  return session;
+}
+
 function setAuthCookie(res: express.Response, token: string) {
   const parts = [
     `${AUTH_COOKIE_NAME}=${encodeURIComponent(token)}`,
@@ -165,6 +276,117 @@ function requireAuth(req: express.Request, res: express.Response, next: express.
   }
 
   return res.status(401).json({ error: "PIN authentication required." });
+}
+
+function reservePaidUsage(req: express.Request, kind: UsageKind) {
+  resetUsageIfNeeded();
+
+  const config = getUsageConfig();
+  const session = getUsageSession(req);
+  const dailyLimit = kind === "story" ? config.dailyStoryLimit : config.dailyImageLimit;
+  const sessionLimit = kind === "story" ? config.sessionStoryLimit : config.sessionImageLimit;
+  const dailyCount = kind === "story" ? dailyUsage.storyRequests : dailyUsage.imageRequests;
+  const sessionCount = kind === "story" ? session.storyRequests : session.imageRequests;
+
+  if (dailyLimit > 0 && dailyCount >= dailyLimit) {
+    if (kind === "story") dailyUsage.storyBlocked += 1;
+    else dailyUsage.imageBlocked += 1;
+    return { allowed: false, reason: "daily-limit" as const, config };
+  }
+
+  if (sessionLimit > 0 && sessionCount >= sessionLimit) {
+    if (kind === "story") dailyUsage.storyBlocked += 1;
+    else dailyUsage.imageBlocked += 1;
+    return { allowed: false, reason: "session-limit" as const, config };
+  }
+
+  if (config.dailyEstimatedUsdLimit > 0 && dailyUsage.estimatedCostUsd >= config.dailyEstimatedUsdLimit) {
+    if (kind === "story") dailyUsage.storyBlocked += 1;
+    else dailyUsage.imageBlocked += 1;
+    return { allowed: false, reason: "daily-cost-limit" as const, config };
+  }
+
+  if (kind === "story") {
+    dailyUsage.storyRequests += 1;
+    session.storyRequests += 1;
+  } else {
+    dailyUsage.imageRequests += 1;
+    session.imageRequests += 1;
+  }
+
+  return { allowed: true, reason: null, config };
+}
+
+function extractUsageMetadata(response: any) {
+  const usage = response?.usageMetadata || {};
+  return {
+    inputTokens: Number(usage.promptTokenCount || usage.inputTokenCount || 0),
+    outputTokens: Number(usage.candidatesTokenCount || usage.outputTokenCount || 0),
+  };
+}
+
+function estimateUsageCostUsd(
+  kind: UsageKind,
+  usage: { inputTokens: number; outputTokens: number },
+  generatedImages: number,
+  config = getUsageConfig()
+) {
+  const textCost =
+    (usage.inputTokens / 1_000_000) * config.textInputUsdPer1MTokens +
+    (usage.outputTokens / 1_000_000) * config.textOutputUsdPer1MTokens;
+  const imageCost = kind === "image" ? generatedImages * config.imageUsdPerGeneratedImage : 0;
+  return textCost + imageCost;
+}
+
+function recordPaidUsage(
+  req: express.Request,
+  kind: UsageKind,
+  details: {
+    model: string;
+    status: "success" | "failure" | "fallback";
+    startedAt: number;
+    response?: any;
+    generatedImages?: number;
+    error?: unknown;
+  }
+) {
+  resetUsageIfNeeded();
+  const session = getUsageSession(req);
+  const usage = extractUsageMetadata(details.response);
+  const generatedImages = details.generatedImages || 0;
+  const estimatedCostUsd = estimateUsageCostUsd(kind, usage, generatedImages);
+
+  dailyUsage.inputTokens += usage.inputTokens;
+  dailyUsage.outputTokens += usage.outputTokens;
+  dailyUsage.estimatedCostUsd += estimatedCostUsd;
+  session.estimatedCostUsd += estimatedCostUsd;
+
+  if (kind === "story") {
+    if (details.status === "success") dailyUsage.storySuccesses += 1;
+    else dailyUsage.storyFailures += 1;
+  } else if (details.status === "success") {
+    dailyUsage.imageSuccesses += 1;
+  } else if (details.status === "fallback") {
+    dailyUsage.imageFallbacks += 1;
+  } else {
+    dailyUsage.imageFailures += 1;
+  }
+
+  console.log(
+    JSON.stringify({
+      event: "usage",
+      kind,
+      model: details.model,
+      status: details.status,
+      inputTokens: usage.inputTokens,
+      outputTokens: usage.outputTokens,
+      generatedImages,
+      estimatedCostUsd: Number(estimatedCostUsd.toFixed(6)),
+      latencyMs: Date.now() - details.startedAt,
+      sessionKey: getUsageSessionKey(req),
+      error: details.error instanceof Error ? details.error.message : undefined,
+    })
+  );
 }
 
 function sanitizeString(value: unknown, maxLength: number, fallback = "") {
@@ -285,6 +507,42 @@ app.post("/api/auth/logout", (req, res) => {
   res.json({ authenticated: false });
 });
 
+app.get("/api/admin/usage", requireAuth, (req, res) => {
+  resetUsageIfNeeded();
+  const config = getUsageConfig();
+  const session = getUsageSession(req);
+
+  res.json({
+    date: dailyUsage.date,
+    limits: {
+      dailyStoryLimit: config.dailyStoryLimit,
+      dailyImageLimit: config.dailyImageLimit,
+      sessionStoryLimit: config.sessionStoryLimit,
+      sessionImageLimit: config.sessionImageLimit,
+      dailyEstimatedUsdLimit: config.dailyEstimatedUsdLimit,
+    },
+    daily: {
+      storyRequests: dailyUsage.storyRequests,
+      storySuccesses: dailyUsage.storySuccesses,
+      storyFailures: dailyUsage.storyFailures,
+      storyBlocked: dailyUsage.storyBlocked,
+      imageRequests: dailyUsage.imageRequests,
+      imageSuccesses: dailyUsage.imageSuccesses,
+      imageFallbacks: dailyUsage.imageFallbacks,
+      imageFailures: dailyUsage.imageFailures,
+      imageBlocked: dailyUsage.imageBlocked,
+      inputTokens: dailyUsage.inputTokens,
+      outputTokens: dailyUsage.outputTokens,
+      estimatedCostUsd: Number(dailyUsage.estimatedCostUsd.toFixed(6)),
+    },
+    session: {
+      storyRequests: session.storyRequests,
+      imageRequests: session.imageRequests,
+      estimatedCostUsd: Number(session.estimatedCostUsd.toFixed(6)),
+    },
+  });
+});
+
 app.use("/api/adventure", requireAuth, rateLimit("adventure-api", 60, 60 * 1000));
 
 // JSON Schema for AdventureScene
@@ -397,6 +655,8 @@ Ensure that:
 5. Default starting health should be near 100, and include a starting status message like 'Nervous' or 'Ready'.
 6. Do NOT return markdown or wrapping backticks outside of the JSON. Return a clean, valid JSON matching the schema precisely.`;
 
+  let paidUsageStartedAt = 0;
+
   try {
     if (!isApiKeyConfigured()) {
       // Fallback if no real key is configured
@@ -451,8 +711,14 @@ Ensure that:
       });
     }
 
+    const usageReservation = reservePaidUsage(req, "story");
+    if (!usageReservation.allowed) {
+      return res.status(429).json({ error: "Story generation limit reached. Please try again later." });
+    }
+
+    paidUsageStartedAt = Date.now();
     const response = await ai.models.generateContent({
-      model: "gemini-3.5-flash",
+      model: STORY_MODEL,
       contents: "Generate the starting scene of the adventure.",
       config: {
         systemInstruction,
@@ -465,8 +731,22 @@ Ensure that:
     const sceneData = JSON.parse(response.text || "{}");
     // Generate a unique ID
     sceneData.id = "scene_" + Date.now();
+    recordPaidUsage(req, "story", {
+      model: STORY_MODEL,
+      status: "success",
+      startedAt: paidUsageStartedAt,
+      response,
+    });
     res.json(sceneData);
   } catch (err: any) {
+    if (paidUsageStartedAt) {
+      recordPaidUsage(req, "story", {
+        model: STORY_MODEL,
+        status: "failure",
+        startedAt: paidUsageStartedAt,
+        error: err,
+      });
+    }
     console.error("Error starting adventure:", err);
     res.status(500).json({ error: "Failed to generate dynamic starting scene." });
   }
@@ -533,6 +813,8 @@ Your crucial rules:
 4. Outline EXACTLY 3 fresh choices suited to the immediate new situation. Indicate risk level or action stance in consequencePreview.
 5. Do NOT return markdown or wrapping backticks outside of the JSON. Precision schema compliance is mandatory.`;
 
+  let paidUsageStartedAt = 0;
+
   try {
     if (!isApiKeyConfigured()) {
       // Fallback next scene
@@ -593,8 +875,14 @@ Your crucial rules:
       });
     }
 
+    const usageReservation = reservePaidUsage(req, "story");
+    if (!usageReservation.allowed) {
+      return res.status(429).json({ error: "Story generation limit reached. Please try again later." });
+    }
+
+    paidUsageStartedAt = Date.now();
     const response = await ai.models.generateContent({
-      model: "gemini-3.5-flash",
+      model: STORY_MODEL,
       contents: `Generate consequences for character action: "${choiceSelected}"`,
       config: {
         systemInstruction,
@@ -606,8 +894,22 @@ Your crucial rules:
 
     const sceneData = JSON.parse(response.text || "{}");
     sceneData.id = "scene_" + Date.now();
+    recordPaidUsage(req, "story", {
+      model: STORY_MODEL,
+      status: "success",
+      startedAt: paidUsageStartedAt,
+      response,
+    });
     res.json(sceneData);
   } catch (err: any) {
+    if (paidUsageStartedAt) {
+      recordPaidUsage(req, "story", {
+        model: STORY_MODEL,
+        status: "failure",
+        startedAt: paidUsageStartedAt,
+        error: err,
+      });
+    }
     console.error("Error generating next scene:", err);
     res.status(500).json({ error: "Failed to proceed to next scene in story." });
   }
@@ -632,6 +934,8 @@ app.post("/api/adventure/image", rateLimit("adventure-image", 20, 60 * 1000), as
   // We combine the preset style and the scene's descriptive prompt to ensure absolute artistic style consistency!
   const finalPrompt = `An evocative landscape/scene. Artistic style: ${baseStylePrompt}. Subject matter: ${imagePrompt}. Focus on rich mood, beautiful spacing, centered focal point, professional coloring, no text, no captions, highly dramatic game illustration. Aspect ratio 16:9.`;
 
+  let paidUsageStartedAt = 0;
+
   try {
     if (!isApiKeyConfigured()) {
       // Fallback SVG
@@ -639,11 +943,23 @@ app.post("/api/adventure/image", rateLimit("adventure-image", 20, 60 * 1000), as
       return res.json({ imageUrl: fallbackUrl, isFallback: true });
     }
 
-    console.log(`Generating real-time image with model gemini-2.5-flash-image... Prompt length: ${finalPrompt.length}`);
+    const usageReservation = reservePaidUsage(req, "image");
+    if (!usageReservation.allowed) {
+      console.warn(`[Media Engine] Image generation skipped because ${usageReservation.reason} was reached.`);
+      const fallbackUrl = generateFallbackSvg(title || "A Mystical Chapter", imagePrompt, genre, artStyle);
+      return res.json({
+        imageUrl: fallbackUrl,
+        isFallback: true,
+        limitReached: usageReservation.reason,
+      });
+    }
+
+    console.log(`Generating real-time image with model ${IMAGE_MODEL}... Prompt length: ${finalPrompt.length}`);
     
     // Call gemini-2.5-flash-image
+    paidUsageStartedAt = Date.now();
     const response = await ai.models.generateContent({
-      model: 'gemini-2.5-flash-image',
+      model: IMAGE_MODEL,
       contents: {
         parts: [
           {
@@ -669,10 +985,23 @@ app.post("/api/adventure/image", rateLimit("adventure-image", 20, 60 * 1000), as
     }
 
     if (base64Image) {
+      recordPaidUsage(req, "image", {
+        model: IMAGE_MODEL,
+        status: "success",
+        startedAt: paidUsageStartedAt,
+        response,
+        generatedImages: 1,
+      });
       res.json({ imageUrl: `data:image/png;base64,${base64Image}`, isFallback: false });
     } else {
       console.warn("[Media Engine] Gemini model did not supply image bits. Dispatching vector visualization fallback.");
       const fallbackUrl = generateFallbackSvg(title || "A Mystical Chapter", imagePrompt, genre, artStyle);
+      recordPaidUsage(req, "image", {
+        model: IMAGE_MODEL,
+        status: "fallback",
+        startedAt: paidUsageStartedAt,
+        response,
+      });
       res.json({ imageUrl: fallbackUrl, isFallback: true });
     }
   } catch (err: any) {
@@ -683,6 +1012,14 @@ app.post("/api/adventure/image", rateLimit("adventure-image", 20, 60 * 1000), as
       console.warn(`[Media Engine] Image model offline or busy. Instantly serving beautiful vector illustration fallbacks.`);
     }
     const fallbackUrl = generateFallbackSvg(title || "A Mystical Chapter", imagePrompt, genre, artStyle);
+    if (paidUsageStartedAt) {
+      recordPaidUsage(req, "image", {
+        model: IMAGE_MODEL,
+        status: "failure",
+        startedAt: paidUsageStartedAt,
+        error: err,
+      });
+    }
     res.json({ imageUrl: fallbackUrl, isFallback: true, error: "Quota system limit reached. Vector visualization rendered successfully." });
   }
 });
