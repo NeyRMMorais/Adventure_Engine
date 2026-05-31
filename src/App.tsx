@@ -17,13 +17,46 @@ export default function App() {
   const [loginLogs, setLoginLogs] = useState<any[]>([]);
   const [isLoadingLogs, setIsLoadingLogs] = useState(false);
 
-  const [config, setConfig] = useState<AdventureConfig | null>(null);
-  const [scenes, setScenes] = useState<AdventureScene[]>([]);
-  const [gameState, setGameState] = useState<GameState>({
-    inventory: [],
-    currentQuest: "",
-    characterStatus: { health: 100, statusMessage: "Prepared" },
-    history: []
+  const [config, setConfig] = useState<AdventureConfig | null>(() => {
+    try {
+      const saved = localStorage.getItem("adventure_forge_save");
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        return parsed.config || null;
+      }
+    } catch (e) {
+      console.error("Error restoring config from localStorage", e);
+    }
+    return null;
+  });
+  const [scenes, setScenes] = useState<AdventureScene[]>(() => {
+    try {
+      const saved = localStorage.getItem("adventure_forge_save");
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        return parsed.scenes || [];
+      }
+    } catch (e) {
+      console.error("Error restoring scenes from localStorage", e);
+    }
+    return [];
+  });
+  const [gameState, setGameState] = useState<GameState>(() => {
+    try {
+      const saved = localStorage.getItem("adventure_forge_save");
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        if (parsed.gameState) return parsed.gameState;
+      }
+    } catch (e) {
+      console.error("Error restoring gameState from localStorage", e);
+    }
+    return {
+      inventory: [],
+      currentQuest: "",
+      characterStatus: { health: 100, statusMessage: "Prepared" },
+      history: []
+    };
   });
   const [isLoading, setIsLoading] = useState(false);
   const [isLoadingNext, setIsLoadingNext] = useState(false);
@@ -48,6 +81,24 @@ export default function App() {
   useEffect(() => {
     checkAuth();
   }, []);
+
+  // Sync state to localStorage for local auto-saving
+  useEffect(() => {
+    try {
+      if (config) {
+        const sessionData = {
+          config,
+          scenes,
+          gameState
+        };
+        localStorage.setItem("adventure_forge_save", JSON.stringify(sessionData));
+      } else {
+        localStorage.removeItem("adventure_forge_save");
+      }
+    } catch (e) {
+      console.error("Failed to persist save state to localStorage", e);
+    }
+  }, [config, scenes, gameState]);
 
   const handleGoogleLogin = async () => {
     setIsAuthLoading(true);
