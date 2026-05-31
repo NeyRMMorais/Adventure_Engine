@@ -23,18 +23,16 @@ app.set("trust proxy", 1);
 app.use((req, res, next) => {
   res.setHeader("X-Content-Type-Options", "nosniff");
   res.setHeader("Referrer-Policy", "strict-origin-when-cross-origin");
-  res.setHeader("X-Frame-Options", "DENY");
   res.setHeader("Permissions-Policy", "camera=(), microphone=(), geolocation=()");
   res.setHeader(
     "Content-Security-Policy",
     [
       "default-src 'self'",
-      "script-src 'self' 'unsafe-inline'",
+      "script-src 'self' 'unsafe-inline' 'unsafe-eval'",
       "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
       "font-src 'self' https://fonts.gstatic.com",
-      "img-src 'self' data:",
-      "connect-src 'self'",
-      "frame-ancestors 'none'",
+      "img-src 'self' data: https:",
+      "connect-src 'self' ws: wss: *",
       "base-uri 'self'",
       "form-action 'self'",
     ].join("; ")
@@ -252,13 +250,10 @@ function setAuthCookie(res: express.Response, token: string) {
     `${AUTH_COOKIE_NAME}=${encodeURIComponent(token)}`,
     "Path=/",
     "HttpOnly",
-    "SameSite=Strict",
+    "SameSite=None",
+    "Secure",
     `Max-Age=${Math.floor(AUTH_MAX_AGE_MS / 1000)}`,
   ];
-
-  if (IS_PRODUCTION) {
-    parts.push("Secure");
-  }
 
   res.setHeader("Set-Cookie", parts.join("; "));
 }
@@ -266,7 +261,7 @@ function setAuthCookie(res: express.Response, token: string) {
 function clearAuthCookie(res: express.Response) {
   res.setHeader(
     "Set-Cookie",
-    `${AUTH_COOKIE_NAME}=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0${IS_PRODUCTION ? "; Secure" : ""}`
+    `${AUTH_COOKIE_NAME}=; Path=/; HttpOnly; SameSite=None; Secure; Max-Age=0`
   );
 }
 

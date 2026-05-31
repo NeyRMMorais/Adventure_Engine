@@ -145,10 +145,10 @@ export const GameScreen: React.FC<GameScreenProps> = ({
         </div>
 
         {/* Compact Grid Dashboard Splitting Prose and Story Controls */}
-        <div className="grid grid-cols-1 md:grid-cols-12 md:divide-x divide-white/5">
+        <div className="grid grid-cols-1 md:grid-cols-12 lg:grid-cols-1 xl:grid-cols-12 md:divide-x lg:divide-x-0 xl:divide-x lg:divide-y xl:divide-y-0 divide-white/5">
           
           {/* LEFT PANEL: Prose / Location Info */}
-          <div className="col-span-1 md:col-span-7 p-5 md:p-6 flex flex-col gap-4">
+          <div className="col-span-1 md:col-span-7 lg:col-span-1 xl:col-span-7 p-5 md:p-6 flex flex-col gap-4">
             <div className="flex flex-wrap items-center justify-between gap-2 border-b border-white/5 pb-2.5">
               <div className="flex items-center gap-2">
                 <MapPin className="w-3.5 h-3.5 text-immersive-accent" />
@@ -201,7 +201,7 @@ export const GameScreen: React.FC<GameScreenProps> = ({
           </div>
 
           {/* RIGHT PANEL: Choices & Input interactions */}
-          <div className="col-span-1 md:col-span-5 p-5 md:p-6 flex flex-col justify-between gap-5 bg-white/[0.005]">
+          <div className="col-span-1 md:col-span-5 lg:col-span-1 xl:col-span-5 p-5 md:p-6 flex flex-col justify-between gap-5 bg-white/[0.005]">
             <div className="flex flex-col gap-3">
               <h2 className="text-[9px] font-extrabold font-mono uppercase tracking-wider text-immersive-accent opacity-90 flex items-center gap-1.5 border-b border-white/5 pb-2.5">
                 <Sparkles className="w-3.5 h-3.5 text-immersive-accent" />
@@ -209,7 +209,7 @@ export const GameScreen: React.FC<GameScreenProps> = ({
               </h2>
 
               {/* Ultra-sleek choices list */}
-              <div className="flex flex-col gap-2">
+              <div className="flex flex-col gap-2.5">
                 {scene.choices && scene.choices.map((choice: Choice, idx: number) => {
                   const isDisabled = isLoadingNext;
                   return (
@@ -218,24 +218,24 @@ export const GameScreen: React.FC<GameScreenProps> = ({
                       key={choice.id || `choice-${idx}`}
                       disabled={isDisabled}
                       onClick={() => onSelectChoice(choice.text)}
-                      className="w-full text-left bg-white/[0.01] hover:bg-white/[0.05] border border-white/5 hover:border-immersive-accent/40 disabled:opacity-50 transition-all duration-300 rounded-xl p-3 flex items-center justify-between gap-3 cursor-pointer text-xs group disabled:cursor-not-allowed"
+                      className="w-full text-left bg-white/[0.01] hover:bg-white/[0.05] border border-white/5 hover:border-immersive-accent/40 disabled:opacity-50 transition-all duration-300 rounded-xl p-3.5 sm:p-4 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 sm:gap-4 cursor-pointer text-xs group disabled:cursor-not-allowed hover:shadow-[0_4px_12px_rgba(212,163,115,0.02)]"
                     >
-                      <div className="flex items-center gap-3">
-                        <div className="w-5 h-5 border border-immersive-accent rounded-full flex items-center justify-center text-[9px] font-bold font-mono text-immersive-accent shrink-0 group-hover:bg-immersive-accent/10 transition-colors">
+                      <div className="flex items-start gap-3 flex-1 w-full min-w-0">
+                        <div className="w-5 h-5 border border-immersive-accent rounded-full flex items-center justify-center text-[9px] font-bold font-mono text-immersive-accent shrink-0 group-hover:bg-immersive-accent/10 transition-colors mt-0.5">
                           {idx + 1}
                         </div>
-                        <span className="text-slate-350 group-hover:text-white leading-normal font-medium transition-colors line-clamp-2">
+                        <span className="text-slate-350 group-hover:text-white leading-relaxed font-semibold transition-colors break-words flex-1 min-w-0">
                           {choice.text}
                         </span>
                       </div>
                       
-                      <div className="flex items-center gap-1.5 shrink-0">
+                      <div className="flex items-center gap-1.5 shrink-0 self-end sm:self-center">
                         <span 
                           className={`text-[8px] uppercase font-mono px-2 py-0.5 rounded border tracking-wider font-bold ${getConsequenceClass(choice.consequencePreview)}`}
                         >
                           {choice.consequencePreview}
                         </span>
-                        <ArrowRight className="w-3 h-3 text-slate-600 group-hover:text-white group-hover:translate-x-1 transition-all" />
+                        <ArrowRight className="w-3 h-3 text-slate-600 group-hover:text-white group-hover:translate-x-1 transition-all shrink-0" />
                       </div>
                     </button>
                   );
