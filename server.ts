@@ -2,6 +2,7 @@ import express from "express";
 import path from "path";
 import dotenv from "dotenv";
 import * as crypto from "crypto";
+import fs from "fs";
 import { GoogleGenAI, Type } from "@google/genai";
 import { createServer as createViteServer } from "vite";
 import { generateFallbackSvg, ART_STYLES, GENRES } from "./src/utils.js"; // Standard extension for ES modules if transpiled
@@ -169,6 +170,59 @@ function timingSafeEqual(a: string, b: string) {
   const right = Buffer.from(b);
   return left.length === right.length && crypto.timingSafeEqual(left, right);
 }
+
+type LoginLogEntry = {
+  timestamp: string;
+  method: string;
+  email: string;
+  success: boolean;
+  ip: string;
+};
+
+let loginLogs: LoginLogEntry[] = [];
+const LOGS_FILE_PATH = path.join(process.cwd(), "data", "logins.json");
+
+// Ensure data directory exists
+try {
+  if (!fs.existsSync(path.join(process.cwd(), "data"))) {
+    fs.mkdirSync(path.join(process.cwd(), "data"), { recursive: true });
+  }
+} catch (err) {
+  console.error("Failed to create data directory:", err);
+}
+
+function loadLoginLogs() {
+  try {
+    if (fs.existsSync(LOGS_FILE_PATH)) {
+      const content = fs.readFileSync(LOGS_FILE_PATH, "utf-8");
+      loginLogs = JSON.parse(content);
+    }
+  } catch (err) {
+    console.error("Error loading login logs:", err);
+    loginLogs = [];
+  }
+}
+
+async function recordLoginAttempt(method: string, email: string, success: boolean, ip: string) {
+  const newEntry: LoginLogEntry = {
+    timestamp: new Date().toISOString(),
+    method,
+    email,
+    success,
+    ip,
+  };
+  loginLogs.unshift(newEntry);
+  if (loginLogs.length > 200) {
+    loginLogs = loginLogs.slice(0, 200);
+  }
+  try {
+    fs.writeFileSync(LOGS_FILE_PATH, JSON.stringify(loginLogs, null, 2), "utf-8");
+  } catch (err) {
+    console.error("Failed to write logins log to disk:", err);
+  }
+}
+
+loadLoginLogs();
 
 function signSession(payload: object) {
   const encodedPayload = Buffer.from(JSON.stringify(payload)).toString("base64url");
@@ -472,6 +526,26 @@ function isApiKeyConfigured() {
   return process.env.GEMINI_API_KEY && process.env.GEMINI_API_KEY !== "MY_GEMINI_API_KEY";
 }
 
+// Helper to get Google OAuth redirect URI dynamically with respect to trust proxy configs and local development
+function getRedirectUri(req: express.Request): string {
+  const envUrl = process.env.APP_URL;
+  if (envUrl && envUrl !== "MY_APP_URL" && envUrl.trim() !== "") {
+    const base = envUrl.replace(/\/+$/, "");
+    return `${base}/auth/google/callback`;
+  }
+
+  const protocol = req.protocol || "http";
+  const hostname = req.hostname || "localhost";
+  const isLocal = hostname.includes("localhost") || hostname.includes("127.0.0.1");
+  
+  if (isLocal) {
+    const host = req.get("host") || "localhost:3000";
+    return `http://${host}/auth/google/callback`;
+  }
+  
+  return `${protocol}://${hostname}/auth/google/callback`;
+}
+
 // --------------------------------------------------------------------------
 // API ENDPOINTS
 // --------------------------------------------------------------------------
@@ -484,22 +558,257 @@ app.get("/api/health", (req, res) => {
 });
 
 app.get("/api/auth/status", (req, res) => {
-  res.json({ authenticated: verifySession(getSessionToken(req)) });
+  const token = getSessionToken(req);
+  const isValid = verifySession(token);
+  
+  if (!isValid || !token) {
+    return res.json({ authenticated: false });
+  }
+  
+  try {
+    const [encodedPayload] = token.split(".");
+    const payload = JSON.parse(Buffer.from(encodedPayload, "base64url").toString("utf8"));
+    return res.json({
+      authenticated: true,
+      user: {
+        email: payload.email || "pin-administrator",
+        name: payload.name || "Administrator",
+        picture: payload.picture || ""
+      }
+    });
+  } catch {
+    return res.json({ authenticated: true });
+  }
 });
 
 app.post("/api/auth/login", rateLimit("auth-login", 8, 15 * 60 * 1000), (req, res) => {
   const pin = sanitizeString(req.body?.pin, 32);
+  const ip = getClientIp(req);
+  
   if (!timingSafeEqual(pin, getAuthPin())) {
+    recordLoginAttempt("PIN-Code", "incorrect-pin", false, ip);
     return res.status(401).json({ error: "Invalid PIN." });
   }
 
-  setAuthCookie(res, signSession({ iat: Date.now() }));
+  recordLoginAttempt("PIN-Code", "authorized-pin", true, ip);
+  setAuthCookie(res, signSession({ iat: Date.now(), email: "pin-administrator", name: "Administrator" }));
   res.json({ authenticated: true });
 });
 
 app.post("/api/auth/logout", (req, res) => {
   clearAuthCookie(res);
   res.json({ authenticated: false });
+});
+
+app.get("/api/auth/google/url", (req, res) => {
+  const clientId = process.env.GOOGLE_CLIENT_ID;
+  if (!clientId) {
+    return res.json({ isSimulated: true, url: "/auth/google/simulated-login" });
+  }
+  
+  const redirectUri = getRedirectUri(req);
+  const state = crypto.randomBytes(16).toString("hex");
+  
+  const params = new URLSearchParams({
+    client_id: clientId,
+    redirect_uri: redirectUri,
+    response_type: "code",
+    scope: "openid email profile",
+    state: state
+  });
+  
+  res.json({
+    isSimulated: false,
+    url: `https://accounts.google.com/o/oauth2/v2/auth?${params.toString()}`
+  });
+});
+
+app.post("/api/auth/google/simulate_success", (req, res) => {
+  const { email, name, picture } = req.body;
+  const userEmail = sanitizeString(email, 128) || "neyrmm@gmail.com";
+  const userName = sanitizeString(name, 128) || "Neyr MM";
+  const userPic = sanitizeString(picture, 256) || "";
+  const ip = getClientIp(req);
+  
+  recordLoginAttempt("Google Sign-In (Simulated)", userEmail, true, ip);
+  setAuthCookie(res, signSession({ iat: Date.now(), email: userEmail, name: userName, picture: userPic }));
+  res.json({ success: true });
+});
+
+app.get("/auth/google/callback", async (req, res) => {
+  const { code } = req.query;
+  const clientId = process.env.GOOGLE_CLIENT_ID;
+  const clientSecret = process.env.GOOGLE_CLIENT_SECRET;
+  const ip = getClientIp(req);
+  
+  if (!clientId || !clientSecret || !code) {
+    await recordLoginAttempt("Google Sign-In", "failed-missing-creds", false, ip);
+    return res.status(400).send("Configuration mismatch or authorization code missing.");
+  }
+  
+  try {
+    const redirectUri = getRedirectUri(req);
+    const tokenResponse = await fetch("https://oauth2.googleapis.com/token", {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({
+        client_id: clientId,
+        client_secret: clientSecret,
+        code: code as string,
+        grant_type: "authorization_code",
+        redirect_uri: redirectUri
+      })
+    });
+    
+    if (!tokenResponse.ok) {
+      const errorText = await tokenResponse.text();
+      console.error("Google token exchange failed:", errorText);
+      await recordLoginAttempt("Google Sign-In", "token-exchange-error", false, ip);
+      return res.status(500).send(`Token exchange failed: ${errorText}`);
+    }
+    
+    const tokens = await tokenResponse.json() as any;
+    const idToken = tokens.id_token;
+    
+    const [, payload] = idToken.split(".");
+    const decodedPayload = JSON.parse(Buffer.from(payload, "base64url").toString("utf-8"));
+    const email = decodedPayload.email || "unknown@google.com";
+    const name = decodedPayload.name || email.split("@")[0];
+    const picture = decodedPayload.picture || "";
+    
+    await recordLoginAttempt("Google Sign-In", email, true, ip);
+    setAuthCookie(res, signSession({ iat: Date.now(), email, name, picture }));
+    
+    res.send(`
+      <html>
+        <body>
+          <script>
+            if (window.opener) {
+              window.opener.postMessage({ type: 'OAUTH_AUTH_SUCCESS', user: ${JSON.stringify({ email, name, picture })} }, '*');
+              window.close();
+            } else {
+              window.location.href = '/';
+            }
+          </script>
+          <p>Google authentication successful. This window should close automatically.</p>
+        </body>
+      </html>
+    `);
+  } catch (error: any) {
+    console.error("Google auth callback error:", error);
+    await recordLoginAttempt("Google Sign-In", "system-callback-error", false, ip);
+    res.status(500).send(`Google callback error: ${error.message}`);
+  }
+});
+
+app.get("/auth/google/simulated-login", (req, res) => {
+  res.send(`
+    <html>
+      <head>
+        <title>Google Sign-In Preview</title>
+        <style>
+          body {
+            background-color: #08080a;
+            color: #f1f5f9;
+            font-family: 'Inter', system-ui, sans-serif;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            height: 100vh;
+            margin: 0;
+            padding: 20px;
+            box-sizing: border-box;
+          }
+          .card {
+            background-color: #111216;
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            border-radius: 24px;
+            padding: 32px;
+            max-width: 400px;
+            width: 100%;
+            box-shadow: 0 20px 25px -5px rgb(0 0 0 / 0.5);
+            text-align: center;
+          }
+          h2 { color: #ffffff; margin-top: 0; font-size: 20px; font-weight: 800; letter-spacing: -0.025em; }
+          p { color: #94a3b8; font-size: 13px; line-height: 1.6; margin-bottom: 24px; }
+          .google-btn {
+            background: #ffffff;
+            color: #1e293b;
+            border: none;
+            padding: 12px 24px;
+            font-weight: 700;
+            font-size: 13px;
+            border-radius: 12px;
+            cursor: pointer;
+            width: 100%;
+            transition: all 0.2s;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 8px;
+          }
+          .google-btn:hover { background: #f8fafc; transform: translateY(-1px); }
+          .input-group { text-align: left; margin-bottom: 16px; }
+          label { font-size: 11px; font-weight: 850; text-transform: uppercase; color: #d4a373; font-family: monospace; letter-spacing: 0.1em; display: block; margin-bottom: 6px; }
+          input { width: 100%; background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.1); border-radius: 8px; padding: 10px; color: white; outline: none; box-sizing: border-box; font-size: 13px; }
+          input:focus { border-color: #d4a373; }
+        </style>
+      </head>
+      <body>
+        <div class="card">
+          <h2>Google Account Simulation</h2>
+          <p>This is a simulated Google Login for the AI Studio preview. It allows testing log-in recording and session tracking without needing OAuth secrets.</p>
+          <form onsubmit="handleSubmit(event)">
+            <div class="input-group">
+              <label>Simulated Gmail</label>
+              <input type="email" id="email" value="neyrmm@gmail.com" required />
+            </div>
+            <div class="input-group">
+              <label>Full Name</label>
+              <input type="text" id="name" value="Neyr MM" required />
+            </div>
+            <button type="submit" class="google-btn">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none">
+                <path d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z" fill="#4285F4"/>
+                <path d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z" fill="#34A853"/>
+                <path d="M5.84 14.1c-.22-.66-.35-1.36-.35-2.1s.13-1.44.35-2.1V7.06H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.94l2.85-2.22.81-.62z" fill="#FBBC05"/>
+                <path d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.06l3.66 2.84c.87-2.6 3.3-4.52 6.16-4.52z" fill="#EA4335"/>
+              </svg>
+              Sign In as Google User
+            </button>
+          </form>
+
+          <script>
+            function handleSubmit(e) {
+              e.preventDefault();
+              const email = document.getElementById('email').value;
+              const name = document.getElementById('name').value;
+              const picture = "https://lh3.googleusercontent.com/a/default-user";
+              
+              fetch('/api/auth/google/simulate_success', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ email, name, picture })
+              }).then(res => res.json()).then(data => {
+                if (window.opener) {
+                  window.opener.postMessage({ type: 'OAUTH_AUTH_SUCCESS', user: { email, name, picture } }, '*');
+                  window.close();
+                } else {
+                  window.location.href = '/';
+                }
+              }).catch(err => {
+                alert('Simulation failed: ' + err.message);
+              });
+            }
+          </script>
+        </div>
+      </body>
+    </html>
+  `);
+});
+
+app.get("/api/admin/logins", requireAuth, (req, res) => {
+  res.json({ logs: loginLogs });
 });
 
 app.get("/api/admin/usage", requireAuth, (req, res) => {
