@@ -58,6 +58,18 @@ export default function App() {
       history: []
     };
   });
+  const [adventureImage, setAdventureImage] = useState<string | null>(() => {
+    try {
+      const saved = localStorage.getItem("adventure_forge_save");
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        return parsed.adventureImage || null;
+      }
+    } catch (e) {
+      console.error("Error restoring adventureImage from localStorage", e);
+    }
+    return null;
+  });
   const [isLoading, setIsLoading] = useState(false);
   const [isLoadingNext, setIsLoadingNext] = useState(false);
   const [errorString, setErrorString] = useState<string | null>(null);
@@ -89,7 +101,8 @@ export default function App() {
         const sessionData = {
           config,
           scenes,
-          gameState
+          gameState,
+          adventureImage
         };
         localStorage.setItem("adventure_forge_save", JSON.stringify(sessionData));
       } else {
@@ -98,7 +111,7 @@ export default function App() {
     } catch (e) {
       console.error("Failed to persist save state to localStorage", e);
     }
-  }, [config, scenes, gameState]);
+  }, [config, scenes, gameState, adventureImage]);
 
   const handleGoogleLogin = async () => {
     setIsAuthLoading(true);
@@ -328,6 +341,7 @@ export default function App() {
       characterStatus: { health: 100, statusMessage: "Prepared" },
       history: []
     });
+    setAdventureImage(null);
     setErrorString(null);
   };
 
@@ -452,6 +466,8 @@ export default function App() {
               onSelectChoice={handleSelectChoice}
               isLoadingNext={isLoadingNext}
               onRestart={handleRestart}
+              adventureImage={adventureImage}
+              onSaveAdventureImage={setAdventureImage}
             />
 
             {/* Live Inventory & Progress Tracker */}

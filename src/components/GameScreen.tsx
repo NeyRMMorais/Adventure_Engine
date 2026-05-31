@@ -20,6 +20,8 @@ interface GameScreenProps {
   onSelectChoice: (choiceText: string) => void;
   isLoadingNext: boolean;
   onRestart: () => void;
+  adventureImage: string | null;
+  onSaveAdventureImage: (url: string) => void;
 }
 
 export const GameScreen: React.FC<GameScreenProps> = ({
@@ -27,10 +29,11 @@ export const GameScreen: React.FC<GameScreenProps> = ({
   config,
   onSelectChoice,
   isLoadingNext,
-  onRestart
+  onRestart,
+  adventureImage,
+  onSaveAdventureImage
 }) => {
   const [customAction, setCustomAction] = useState("");
-  const [sceneImage, setSceneImage] = useState<string | null>(null);
   const [isImageLoading, setIsImageLoading] = useState(false);
   const [imageError, setImageError] = useState<string | null>(null);
 
@@ -41,11 +44,12 @@ export const GameScreen: React.FC<GameScreenProps> = ({
   const genreMeta = GENRES[activeGenreKey] || GENRES.medieval_fantasy;
   const artPreset = ART_STYLES[config.artStyle] || ART_STYLES.fantasy_watercolor;
 
-  // Fetch real-time visual when scene or imagePrompt updates
+  // Fetch real-time visual *only once* at the start of the adventure, keeping it throughout.
   useEffect(() => {
+    // If we already have the adventure image, do not generate another one.
+    if (adventureImage) return;
     if (!scene || !scene.imagePrompt) return;
 
-    setSceneImage(null);
     setIsImageLoading(true);
     setImageError(null);
 
@@ -68,7 +72,7 @@ export const GameScreen: React.FC<GameScreenProps> = ({
 
         const data = await response.json();
         if (data.imageUrl) {
-          setSceneImage(data.imageUrl);
+          onSaveAdventureImage(data.imageUrl);
         } else {
           throw new Error("No image buffer returned");
         }
@@ -81,7 +85,7 @@ export const GameScreen: React.FC<GameScreenProps> = ({
     };
 
     fetchImage();
-  }, [scene.id, scene.imagePrompt, config.genre, config.artStyle]);
+  }, [adventureImage, scene, config.genre, config.artStyle, onSaveAdventureImage]);
 
   const handleCustomSubmit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -121,9 +125,9 @@ export const GameScreen: React.FC<GameScreenProps> = ({
                 <p className="text-[9px] font-mono tracking-widest uppercase text-immersive-accent font-extrabold">Painting Vision Render...</p>
               </div>
             </div>
-          ) : sceneImage ? (
+          ) : adventureImage ? (
             <img 
-              src={sceneImage}
+              src={adventureImage}
               alt={scene.title}
               referrerPolicy="no-referrer"
               className="w-full h-full object-cover transition-opacity duration-700 ease-in-out opacity-100"
